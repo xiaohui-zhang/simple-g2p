@@ -39,7 +39,7 @@ class G2PModel {
 
   /// Test the G2P model, given a list of test words, and we output the
   /// predicted prons to the file "output".
-  void Test(char* test_words_file, char* output, const int32& num_variants);
+  void Test(char* test_words_file, char* output, const int32& num_variants, const int32& k);
  
   /// Decode a word. Return the 10-best phone-sequences and normalized posteriors. 
   /// It's basically A-star search, with the cost as the the log-prob of the
@@ -105,7 +105,8 @@ class G2PModel {
                const std::vector<float>& heuristics, // the vector of heuristics.
                BestCostType* best_cost, // see typedef of  BestCostType
                QueueType* q, // 
-               std::vector<int32>* num_active);
+               std::vector<int32>* num_active,
+               std::vector<float>* beam_width);
 
   /// Write prob_ into stream.
   void WriteProb(std::ostream &os, bool binary) const;
@@ -151,6 +152,8 @@ class G2PModel {
   /// It's a two level of maps: letter->letter->prob, representing a matrix
   /// p_max(l2|l1). This'll be used to derive the heuristics during A-star search.
   unordered_map<int32, unordered_map<int32, float> > bound_matrix_;
+  
+  int32 max_num_active_nodes_;
 
 };
 

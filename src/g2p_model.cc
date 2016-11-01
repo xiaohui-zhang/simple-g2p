@@ -136,7 +136,7 @@ void G2PModel::Train(int32 num_threads) {
 /// Test the G2P model, given a list of test words, and we output the
 /// predicted prons to the file "output".
 void G2PModel::Test(char* test_words_file, char* output,
-                    const int32& num_variants) {
+                    const int32& num_variants, const int32& max_num_active_nodes) {
   std::vector<std::vector<int32> > test_words;
   ReadSequences(num_graphemes_, test_words_file, &test_words);
   ComputeBoundMatrix();
@@ -155,6 +155,7 @@ void G2PModel::Test(char* test_words_file, char* output,
       os << std::endl;
     }
   }
+  max_num_active_nodes_ = max_num_active_nodes;
 }
 
 /// Decode a word. Return the 10-best phone-sequences and normalized posteriors. 
@@ -169,6 +170,7 @@ void G2PModel::Decode(const std::vector<int32>& word,
   // The number of active Nodes (in the queue) at each position in the word
   // sequence. We want to limit this number by 1000.
   std::vector<int32> num_active(word.size(), 0);
+  std::vector<float> beam_width(word.size(), -std::numeric_limits<float>::infinity());
   float sum_heuristics = 0.0;
   for (int32 i = 0; i < word.size()-1; i++) {
     float logp = Log(bound_matrix_[word[i]][word[i+1]]);
@@ -204,7 +206,7 @@ void G2PModel::Decode(const std::vector<int32>& word,
           (*results)[i].second /= prob_mass_tot;
         }
         std::sort(results->begin(), results->end(), CompareResult());
-        std::cout << "number of de-queue operations during decoding: " << counts << std::endl;
+        // std::cout << "number of de-queue operations during decoding: " << counts << std::endl;
         break;
       } else continue;
     }
@@ -220,18 +222,18 @@ void G2PModel::Decode(const std::vector<int32>& word,
     if (node.cost < best_cost[node.pos][node.phones]) continue;
     if (node.pos == word.size()-2) {
       std::pair<int32, int32> g(eos_, eos_);
-      Enqueue(node, g, h, heuristics, &best_cost, &q, &num_active);
+      Enqueue(node, g, h, heuristics, &best_cost, &q, &num_active, &beam_width);
     } else {
       std::pair<int32, int32> g(word[node.pos+1], eps_);
-      Enqueue(node, g, h, heuristics, &best_cost, &q, &num_active);
+      Enqueue(node, g, h, heuristics, &best_cost, &q, &num_active, &beam_width);
       for (int32 p = 1; p <= num_phonemes_; p++) {
         std::pair<int32, int32> g(word[node.pos+1], p);
-        Enqueue(node, g, h, heuristics, &best_cost, &q, &num_active);
+        Enqueue(node, g, h, heuristics, &best_cost, &q, &num_active, &beam_width);
       }
     }
     for (int32 p = 1; p <= num_phonemes_; p++) {
       std::pair<int32, int32> g(eps_, p);
-      Enqueue(node, g, h, heuristics, &best_cost, &q, &num_active);
+      Enqueue(node, g, h, heuristics, &best_cost, &q, &num_active, &beam_width);
     }
   }
 }
@@ -531,7 +533,8 @@ void G2PModel::Enqueue(const Node& node, const std::pair<int32, int32>& g,
                        const HistType& h,
                        const std::vector<float>& heuristics,
                        BestCostType* best_cost, QueueType* q,
-                       std::vector<int32>* num_active) {
+                       std::vector<int32>* num_active,
+                       std::vector<float>* beam_width) {
   float cost_new = Log(GetProb(h.size(), h, g)) + node.cost;
   std::vector<int32> phones_new(node.phones);
   if (g.second != eps_) {
@@ -549,17 +552,23 @@ void G2PModel::Enqueue(const Node& node, const std::pair<int32, int32>& g,
   }
   // We only enqueue a Node if the cost is better than before with the same
   // (phoneme-sequence, word-position), and the number of Nodes in the queue
-  // with the same word-position is smaller than 1000.
+  // with the same word-position is smaller than max_num_active_nodes.
   if (best_cost->find(pos_new) == best_cost->end() ||
       (*best_cost)[pos_new].find(phones_new) == (*best_cost)[pos_new].end() ||
       cost_new > (*best_cost)[pos_new][phones_new]){
     (*best_cost)[pos_new][phones_new] = cost_new;
     Node node_new(pos_new, phones_new, cost_new);
 
-    // if ((*num_active)[node_new.pos] == 1000) {
-    if ((*num_active)[node_new.pos] < 1000) {
+    if ((*num_active)[node_new.pos] < max_num_active_nodes_) {
       q->push(node_new);
       (*num_active)[node_new.pos] += 1;
+      if (cost_new > (*beam_width)[node_new.pos])
+        (*beam_width)[node_new.pos] = cost_new;
+    } else if (cost_new > (*beam_width)[node_new.pos]) {
+      // std::cout << " the current node's cost " << cost_new << "is better than the beam width. " << (*beam_width)[node_new.pos] << std::endl;
+      q->push(node_new);
+    } else {
+     // std::cout << " the current node's cost " << cost_new << "is worse than the beam width. " << (*beam_width)[node_new.pos] << std::endl;
     }
   }
 }

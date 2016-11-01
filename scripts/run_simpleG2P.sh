@@ -37,8 +37,8 @@ phones=$2
 ngram_order=$3
 dir=$4
 
-num_total=200
-num_train=160
+num_total=1300
+num_train=1000
 discounting_constant_min=0.1
 discounting_constant_max=0.5
 
@@ -79,7 +79,7 @@ cat $dir/test_prons.txt | \
 # train and evaluate the n-gram graphone model
 time train_g2p $ngram_order $discounting_constant_min $discounting_constant_max $num_graphemes \
   $num_phonemes $dir/words $dir/prons $num_threads $dir/final.mdl
-time apply_g2p $ngram_order $num_graphemes $num_phonemes $dir/final.mdl $dir/test_words $dir/output
+time apply_g2p $ngram_order $num_graphemes $num_phonemes $dir/final.mdl $dir/test_words $dir/output 1000
 cat $dir/output | cut -f1 -d$'\t' |
   awk 'NR==FNR{a[$2] = $1; next} {if ($1 in a) printf a[$1]; for (n=2;n<=NF;n++) if ($n in a) printf(" "a[$n]); printf("\n");}' \
   $dir/grapheme2int - | sed 's/ //g' > $dir/output_words.txt
