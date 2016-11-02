@@ -85,7 +85,6 @@ void G2PModel::Train(int32 num_threads) {
   std::vector<std::vector<std::vector<int32> > > pron_subsets(num_threads);
   int32 block_size = words_.size() / num_threads;
   if (block_size * num_threads < words_.size()) block_size += 1;
-
   std::cout << "running with " << num_threads << 
     " threads , # training examples for each thread is " << block_size << std::endl; 
   for(int32 i = 0; i < num_threads; i++) {
@@ -104,10 +103,10 @@ void G2PModel::Train(int32 num_threads) {
     float log_like_last = -1.0;
     while (true) {
       float log_like_tot = 0.0;
-      counts_[o].clear();
       std::vector<std::thread> threads(num_threads);
       std::vector<float> log_like(num_threads);
       std::vector<CountType> counts(num_threads);
+      counts_[o].clear();
       for(int32 i = 0; i < num_threads; i++) {
         // std::cout << word_subsets[i].size() << std::endl;
         threads[i] = std::thread(ForwardBackwardStatic, this, word_subsets[i], pron_subsets[i], o, &(counts[i]), &(log_like[i]));
@@ -141,6 +140,7 @@ void G2PModel::Test(char* test_words_file, char* output,
   ReadSequences(num_graphemes_, test_words_file, &test_words);
   ComputeBoundMatrix();
   std::ofstream os(output);
+  max_num_active_nodes_ = max_num_active_nodes;
   for (int32 i = 0; i < test_words.size(); i++) {
     std::vector<std::pair<std::vector<int32>, float> > results;
     Decode(test_words[i], &results);
@@ -155,7 +155,6 @@ void G2PModel::Test(char* test_words_file, char* output,
       os << std::endl;
     }
   }
-  max_num_active_nodes_ = max_num_active_nodes;
 }
 
 /// Decode a word. Return the 10-best phone-sequences and normalized posteriors. 
@@ -201,16 +200,17 @@ void G2PModel::Decode(const std::vector<int32>& word,
       float post = Exp(log_like);
       results->push_back(std::pair<std::vector<int32>, float>(node.phones, post));
       prob_mass_tot += post;
-      if (results->size() == 10) {
+      if (results->size() == 1) {
         for (int32 i = 0; i < results->size(); i++) {
           (*results)[i].second /= prob_mass_tot;
         }
         std::sort(results->begin(), results->end(), CompareResult());
-        // std::cout << "number of de-queue operations during decoding: " << counts << std::endl;
+        std::cout << "number of de-queue operations during decoding: " << counts << std::endl;
         break;
       } else continue;
     }
     int32 hist_len = std::min(ngram_order_-1, std::min(static_cast<int32>(node.phones.size()), node.pos+1));
+    // Construct the history vector.
     HistType h;
     if ((hist_len) > 0) {
       for (int32 i = 0; i < hist_len; i++) {
@@ -219,7 +219,8 @@ void G2PModel::Decode(const std::vector<int32>& word,
         h.insert(h.begin(), std::pair<int32, int32>(word[node.pos-i], node.phones[node.phones.size()-1-i]));
       }
     }
-    if (node.cost < best_cost[node.pos][node.phones]) continue;
+    std::vector<int32> ngram(node.phones.end()-std::min(ngram_order_, static_cast<int32>(node.phones.size())), node.phones.end());
+    if (node.cost < best_cost[node.pos][ngram]) continue;
     if (node.pos == word.size()-2) {
       std::pair<int32, int32> g(eos_, eos_);
       Enqueue(node, g, h, heuristics, &best_cost, &q, &num_active, &beam_width);
@@ -272,15 +273,11 @@ float G2PModel::GetProb(const int32& order, // ngram order. 0 == unigram
                         const HistType& h, // history
                         const std::pair<int32, int32>& g) { //graphone
   assert(h.size() <= order);
-  if (prob_[order].find(h) == prob_[order].end() ||
-      prob_[order][h].find(g) == prob_[order][h].end()) {
+  auto it = prob_[order].find(h);
+  if (it == prob_[order].end() ||
+      it->second.find(g) == it->second.end()) {
     if (order == 0) {
-      // Initialize with a uniform distribution in the unigram case.
-      if (std::find(graphones_.begin(), graphones_.end(), g) != graphones_.end()) {
-        return prob_[order][h][g];
-      } else {
-        return 0.0f;
-      }
+      return 1e-37f;
     } else {
       // back off to an lower order history.
       HistType h_reduced(h);
@@ -294,8 +291,8 @@ float G2PModel::GetProb(const int32& order, // ngram order. 0 == unigram
   // This helps with the numerical behavior during decoding when we encounter
   // events unseen in training data.
   // TODO: make probs sum up to one considering this?
-  if (prob_[order][h][g] == 0.0f) return 1e-37f; 
-  return prob_[order][h][g];          
+  if (it->second[g] < 1e-37f) return 1e-37f; 
+  return it->second[g];          
 }
 
 /// Do forward-backward computation, accumulating n-gram counts, given a pair
@@ -422,19 +419,13 @@ void G2PModel::UpdateProb(const int32 order) {
   float tot_counts = 0.0f;
   if (order == 0) {
     HistType h_0; // empty history vector
-    for (unordered_map<std::pair<int32, int32>, float,
-         IntPairHasher>::iterator it = counts_[0][h_0].begin();
+    for (auto it = counts_[0][h_0].begin();
          it != counts_[0][h_0].end(); ++it) {
       tot_counts += it->second;
     };
-    for (int32 i = 0; i < graphones_.size(); i++) {
-      std::pair<int32, int32> g(graphones_[i]);
-      if (counts_[0][h_0].find(g) == counts_[0][h_0].end()) {
-        prob_[0][h_0][g] = 0.0f;
-      } else {
-        // Initialize the unigram model with a uniform distribution.
-        prob_[0][h_0][g] = counts_[0][h_0][g] / tot_counts;
-      }
+    for (auto it = counts_[0][h_0].begin();
+         it != counts_[0][h_0].end(); ++it) {
+        prob_[0][h_0][it->first] = it->second / tot_counts;
     }
   } else {
     for(CountType::iterator it1 = counts_[order].begin();
@@ -459,17 +450,18 @@ void G2PModel::UpdateProb(const int32 order) {
       /// is too small, cause it's not numerically trustworthy.
       if (den < 1e-20f) continue;
       float backoff_prob = discounts_tot / den;
-      float l = 0.0f;
-      for (int32 i = 0; i < graphones_.size(); i++) {
-        std::pair<int32, int32> g(graphones_[i]);
+      HistType h_reduced(h.begin()+1, h.end());
+      for (auto it2 = counts_[order][h].begin();
+           it2 != counts_[order][h].end(); ++it2) {
         // the probability of the lower order model, given the reduced history.
         float p_lower = 0.0f;
-        HistType h_reduced(h.begin()+1, h.end());
-        if (prob_[order-1].find(h_reduced) != prob_[order-1].end() &&
-            prob_[order-1][h_reduced].find(g) != prob_[order-1][h_reduced].end()) {
-          p_lower = prob_[order-1][h_reduced][g];    
+        auto it3 = prob_[order-1].find(h_reduced);
+        if (it3 != prob_[order-1].end()) {
+          auto it4 = it3->second.find(it2->first);
+          if (it4 != it3->second.end())
+            p_lower = it4->second; 
         }
-        prob_[order][h][g] = counts_[order][h][g] / den + backoff_prob * p_lower;
+        prob_[order][h][it2->first] = counts_[order][h][it2->first] / den + backoff_prob * p_lower;
       }
     }
   }
@@ -553,20 +545,24 @@ void G2PModel::Enqueue(const Node& node, const std::pair<int32, int32>& g,
   // We only enqueue a Node if the cost is better than before with the same
   // (phoneme-sequence, word-position), and the number of Nodes in the queue
   // with the same word-position is smaller than max_num_active_nodes.
-  if (best_cost->find(pos_new) == best_cost->end() ||
-      (*best_cost)[pos_new].find(phones_new) == (*best_cost)[pos_new].end() ||
-      cost_new > (*best_cost)[pos_new][phones_new]){
-    (*best_cost)[pos_new][phones_new] = cost_new;
+  std::vector<int32> ngram(phones_new.end()-h.size()-1, phones_new.end());
+  auto it = best_cost->find(pos_new);
+  if (it == best_cost->end() ||
+      it->second.find(ngram) == it->second.end() ||
+      cost_new > it->second[ngram]){
+    (*best_cost)[pos_new][ngram] = cost_new;
     Node node_new(pos_new, phones_new, cost_new);
 
     if ((*num_active)[node_new.pos] < max_num_active_nodes_) {
+      
+      // std::cout << (*num_active)[node_new.pos] << " " <<  max_num_active_nodes_ << std::endl;
       q->push(node_new);
       (*num_active)[node_new.pos] += 1;
       if (cost_new > (*beam_width)[node_new.pos])
         (*beam_width)[node_new.pos] = cost_new;
     } else if (cost_new > (*beam_width)[node_new.pos]) {
       // std::cout << " the current node's cost " << cost_new << "is better than the beam width. " << (*beam_width)[node_new.pos] << std::endl;
-      q->push(node_new);
+      // q->push(node_new);
     } else {
      // std::cout << " the current node's cost " << cost_new << "is worse than the beam width. " << (*beam_width)[node_new.pos] << std::endl;
     }
@@ -667,6 +663,7 @@ void G2PModel::Read(char* file, bool binary) {
   f.open(file);
   ReadProb(f, binary, &prob_);
   f.close();
+  std::cout << "finished reading model." << std::endl;
 }
 
 void G2PModel::PrintWrite() {
