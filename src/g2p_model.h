@@ -104,13 +104,13 @@ class G2PModel {
                                     CountType* counts,
                                     float *log_like) {
                                     assert(words.size() == prons.size());
-                                    for (int32 i = 0; i < words.size(); i++) {
-                                     // std::cout << "entering ForwardBackward" << std::endl;
-                                      *log_like += mdl->ForwardBackward(words[i], prons[i], order, false, counts);
-                                    //  std::cout << "finishing ForwardBackward" << std::endl;
-                                    }
+                                      for (int32 i = 0; i < words.size(); i++) {
+                                       // std::cout << "entering ForwardBackward" << std::endl;
+                                        *log_like += mdl->ForwardBackward(words[i], prons[i], order, false, counts);
+                                      //  std::cout << "finishing ForwardBackward" << std::endl;
+                                     }
                                    }
-  static void tryf(G2PModel *mdl,  std::vector<std::vector<int> > word, int32 i) {}; 
+  
   /// Add count obtained in forward-backward computation into counts_.
   void AddCount(const HistType& h, // history
                 const std::pair<int32, int32>& g, // graphone
@@ -131,8 +131,7 @@ class G2PModel {
   void Enqueue(const Node& node, const std::pair<int32, int32>& g, // graphone
                const HistType& h, // history
                const std::vector<float>& heuristics, // the vector of heuristics.
-               BestCostType* best_cost, // see typedef of  BestCostType
-               QueueType* q, // 
+               ForwardQueueType* q, // 
                std::vector<int32>* num_active,
                std::vector<float>* beam_width);
 
@@ -182,6 +181,22 @@ class G2PModel {
   unordered_map<int32, unordered_map<int32, float> > bound_matrix_;
   
   int32 max_num_active_nodes_;
+
+  /// Contains all visited nodes (on top of which we expanded hypothesis).
+  /// The indexes are used as "node_id" in the Decoder code.
+  std::vector<Node*> nodes_visited_;
+
+  /// The set of all nodes we created during decoding.
+  unordered_set<Node*> nodes_all_;
+  
+  /// The queue we use for the second path A-star search. See g2p_utils.h.
+  BackTraceGraph graph_;
+  
+  /// See "BestCostType" in g2p_utils.h
+  BestCostType best_cost_;
+
+  /// number of pronunciation variants per word.
+  int32 num_variants_;
 
 };
 

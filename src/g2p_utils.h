@@ -147,30 +147,6 @@ struct IntPairHasher {  // hashing function for pair<int>
   static const int kPrime = 7853;
 };
 
-/// During the A-star decoding when applying G2P, the data structure for
-/// representing each node in the decoding graph is like this.
-struct Node {
-  int32 pos; // position in the word sequence.
-  std::vector<int32> phones; // partial decoding results
-  float cost; // cost = log-prob + distance-to-end
-  Node() {}
-  Node(const int32& pos, const std::vector<int32>& phones, const float& cost):
-       pos(pos), phones(phones), cost(cost) {}
-};
-
-struct CompareNode {
-  bool operator() (const Node& a, const Node& b) {
-    return a.cost < b.cost;
-  }
-};
-
-struct CompareResult {
-  bool operator() (const std::pair<std::vector<int32>, float>& a, 
-                   const std::pair<std::vector<int32>, float>& b) {
-    return a.second > b.second;
-  }
-};
-
 /// History type.
 typedef std::vector<std::pair<int32, int32> > HistType;
 
@@ -181,21 +157,123 @@ typedef unordered_map<std::pair<int32, int32>, float, IntPairHasher> Graphone2Pr
 /// history->graphone->prob/count
 typedef unordered_map<HistType, Graphone2ProbType, IntPairVectorHasher> CountType;
 
-/// The queue used A-star decoding.
-typedef std::priority_queue<Node, std::vector<Node>, CompareNode> QueueType;
 
-/// A mapping from partial decoding results (position-in-word-sequence, decoded-phones)
-/// to the best cost encountered so far.
-typedef unordered_map<int32, unordered_map<std::vector<int32>, 
-                      float, IntVectorHasher> > BestCostType;
+/// For Model I/O
 
-// Read a pair of ints from istream.
+/// Read a pair of ints from istream.
 void ReadPair(std::istream &is, bool binary, std::pair<int32, int32>* graphone);
 
-// Read a history (vector of pair of integers) from stream
+/// Read a history (vector of pair of integers) from stream
 void ReadHistory(std::istream &is, bool binary, HistType* hist, int32 order);
 
-// Read a map from graphone (pair of integers) to prob (float) from istream.
+/// Read a map from graphone (pair of integers) to prob (float) from istream.
 void ReadGraphone2ProbMap(std::istream &is, bool binary, Graphone2ProbType* graphone_map);
+
+
+/// For Decoding:
+
+/// The basic data structure we use for the A-star decoding when applying G2P, which
+/// represents each node in the decoding graph.
+struct State {
+  int32 pos; // position in the word sequence.
+  std::vector<int32> phone_hist; // phone history (the most recent (n-1)-gram)
+  State() {}
+  State(const int32& pos, const std::vector<int32>& phone_hist):
+       pos(pos), phone_hist(phone_hist) {}
+  bool operator== (const State &rhs) const {
+    return (pos == rhs.pos) && (phone_hist == rhs.phone_hist);
+  }
+  struct Hasher {
+    size_t operator() (const State &s) const {
+      size_t ans = s.pos;
+      typename std::vector<int32>::const_iterator iter = s.phone_hist.begin(), end = s.phone_hist.end();
+      for (; iter != end; ++iter) {
+        ans *= 7853;
+        ans += *iter;
+      }
+      return ans;
+    }
+  };
+};
+
+/// A wrapper of "State", which contains the cost associated with that state.
+/// In our algorithm we make sure there is a 1-1 mapping between States and Nodes.
+struct Node {
+  State state;
+  float fcost; // forward cost, which is the cost of the path from the start 
+  // node to the current node.
+  float bcost; // backward cost, which is the heuristic that estimates the
+  // cost of the cheapest path from n to the goal.
+  Node() {}
+  Node(const State& state, const float& fcost, const float& bcost):
+       state(state), fcost(fcost), bcost(bcost) {}
+  bool operator== (const Node &rhs) const {
+    return (state == rhs.state) && (fcost + bcost == rhs.fcost + rhs.bcost);
+  }
+};
+
+/// Comparator function for the ForwardQueueType.
+struct CompareNodesWithCost {
+  bool operator() (const std::pair<float, Node*>& a, const std::pair<float, Node*>& b) {
+    return a.first < b.first;
+  }
+};
+
+/// The queue used for forward (1st pass) A-star decoding. 
+/// The reason why we store the cost as a seperate field outside Node is that,
+/// the cost within each Node could be updated (we later found a better path to 
+/// this Node), and we want to keep track of the cost (serving as the priority)
+/// when the Node was en-queued.
+typedef std::priority_queue<std::pair<float, Node*>, std::vector<std::pair<float, Node*> >, CompareNodesWithCost> ForwardQueueType;
+
+/// For each Node/State, we store the ID of its source node, the graphone
+/// and cost on the arc emitted from the source node in SourceInfo. 
+struct SourceInfo {
+  int32 node_id;
+  std::pair<int32, int32> graphone;
+  float arc_cost;
+  SourceInfo() {}
+  SourceInfo(const int32& node_id, const std::pair<int32, int32>& graphone, float arc_cost):
+            node_id(node_id), graphone(graphone), arc_cost(arc_cost) {}
+};
+
+/// A mapping from the current State to the best cost we encountered so far
+/// from the start to here, and the last source Node in the best path.
+typedef unordered_map<State, std::pair<Node*, SourceInfo>, State::Hasher> BestCostType;
+
+/// The graph we use to back-trace the decoding graph in the second pass A-star search,
+/// which stores SourceInfo for all source Nodes of each State.
+typedef unordered_map<State, std::vector<SourceInfo>, State::Hasher> BackTraceGraph;
+
+/// During the second pass A-star search (back-tracing), we store the partial
+/// decoding results (phone_seq) when we visit each node (from different paths).
+struct Hyp {
+  Node* node;
+  float fcost; /// We only need to store the forward cost during back-tracing,
+  /// because the (perfect) backward cost (rest cost) can be found as node->fcost.
+  std::vector<int32> phone_seq;
+  Hyp() {}
+  Hyp(const float& fcost, const std::vector<int32>& phone_seq, Node* node):
+      node(node), fcost(fcost), phone_seq(phone_seq) {}
+};
+
+/// Comparator of Hyp (by the priority fcost+bcost. Note that the "fcost" stored
+/// in the node serves as backward cost (rest cost) here during back-tracing).
+struct CompareHyp {
+  bool operator() (const Hyp& a, const Hyp& b) {
+    return a.fcost + a.node->fcost < b.fcost + b.node->fcost;
+  }
+};
+
+/// The queue we use in the second pass A-star search (back-tracing). 
+typedef std::priority_queue<Hyp, std::vector<Hyp>, CompareHyp> BackTraceQueueType;
+
+/// Comparator of the final decoding results (compare by the posteriors).
+struct CompareResult {
+  bool operator() (const std::pair<std::vector<int32>, float>& a, 
+                   const std::pair<std::vector<int32>, float>& b) {
+    return a.second > b.second;
+  }
+};
 
 #endif

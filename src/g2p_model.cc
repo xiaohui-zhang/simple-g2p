@@ -116,7 +116,7 @@ void G2PModel::Train(int32 num_threads) {
         log_like_tot += log_like[i];
         MergeCount(counts[i], o);
       }
-    // Baseline (no multi-threading)
+    // Baseline for debugging (no multi-threading)
     // CountType counts;
     // for(int32 i = 0; i < words_.size(); i++) {
     //   log_like_tot += ForwardBackward(words_[i], prons_[i], o, false, &counts);
@@ -141,18 +141,21 @@ void G2PModel::Test(char* test_words_file, char* output,
   ComputeBoundMatrix();
   std::ofstream os(output);
   max_num_active_nodes_ = max_num_active_nodes;
+  num_variants_ = num_variants;
   for (int32 i = 0; i < test_words.size(); i++) {
     std::vector<std::pair<std::vector<int32>, float> > results;
     Decode(test_words[i], &results);
-    for (int32 j = 0; j < num_variants; j++) {
+    for (int32 j = 0; j < num_variants_; j++) {
       for (int32 k = 1; k < test_words[i].size()-1; k++) {
         os << test_words[i][k] << " ";
       }
       os << "\t" << results[j].second << "\t";
-      for (int32 k = 1; k < results[j].first.size()-1; k++) {
+      for (int32 k = 1; k < results[j].first.size()-1; k++) { // we don't print eos_, bos_.
         os << results[j].first[k] << " ";
+       // std::cout << results[j].first[k] << " ";
       }
       os << std::endl;
+      // std::cout << std::endl;
     }
   }
 }
@@ -170,73 +173,151 @@ void G2PModel::Decode(const std::vector<int32>& word,
   // sequence. We want to limit this number by 1000.
   std::vector<int32> num_active(word.size(), 0);
   std::vector<float> beam_width(word.size(), -std::numeric_limits<float>::infinity());
-  float sum_heuristics = 0.0;
+  float sum_heuristics = 0.0f;
   for (int32 i = 0; i < word.size()-1; i++) {
     float logp = Log(bound_matrix_[word[i]][word[i+1]]);
     sum_heuristics += logp;
     heuristics.push_back(logp);
   }
-  heuristics.push_back(0.0);
-  BestCostType best_cost;
-  std::vector<int32> bos;
-  bos.push_back(bos_);
-  best_cost[0][bos] = sum_heuristics;
-  Node node0(0, bos, sum_heuristics);
-  QueueType q;
-  q.push(node0);
+  heuristics.push_back(0.0f);
+
+  // Construct the start node and store related information.
+  std::vector<int32> phone_hist0;
+  phone_hist0.push_back(bos_);
+  State state0(0, phone_hist0);
+  Node *node0 = new Node(state0, 0.0f, sum_heuristics);
+  nodes_all_.insert(node0);
+  
+  // We denote the source node_id of the start node as -1.
+  SourceInfo source_info0(-1, std::pair<int32, int32>(bos_, bos_), 0.0f);
+  best_cost_[state0] = std::pair<Node*, SourceInfo>(node0, source_info0);
+  graph_[state0] = std::vector<SourceInfo>();
+
+  ForwardQueueType q;
+  q.push(std::pair<float, Node*>(sum_heuristics, node0));
   num_active[0] += 1;
 
   int32 counts = 0;
-  float prob_mass_tot = 0.0;
+  float prob_mass_tot = 0.0f;
+  
+  BackTraceQueueType q2;
+
   while (!q.empty()) {
     counts += 1;
-    Node node = q.top();
+
+    std::pair<float, Node*> node_with_cost = q.top();
     q.pop();
-    num_active[node.pos] -= 1;
-    if (node.pos == word.size()-1) {
-      assert(node.phones[node.phones.size()-1] == eos_);
-      float log_like = 0.0f;
-      log_like = ForwardBackward(word, node.phones, ngram_order_-1, true);
-      float post = Exp(log_like);
-      results->push_back(std::pair<std::vector<int32>, float>(node.phones, post));
-      prob_mass_tot += post;
-      if (results->size() == 1) {
-        for (int32 i = 0; i < results->size(); i++) {
-          (*results)[i].second /= prob_mass_tot;
-        }
-        std::sort(results->begin(), results->end(), CompareResult());
-        std::cout << "number of de-queue operations during decoding: " << counts << std::endl;
+    auto node = node_with_cost.second;
+    num_active[node->state.pos] -= 1;
+    if (node_with_cost.first != node->fcost + node->bcost) continue;
+    // We have updated the cost of the same node in a former en-queue operation.
+    // So we are skipping visiting this node for now to avoid duplicated visits.
+    if (node->state.phone_hist[node->state.phone_hist.size()-1] == eos_) 
+      assert(node->state.pos == word.size()-1);
+    if (node->state.pos == word.size()-1) {
+      assert(node->state.phone_hist[node->state.phone_hist.size()-1] == eos_);
+      q2.push(Hyp(0.0,  std::vector<int32>(), node));
+      if (q2.size() == num_variants_)
         break;
-      } else continue;
+      continue;
+   
+   /// One-best result generation. For debugging.
+   //   auto node_next_id = best_cost_[node->state].second.node_id;
+   //   std::vector<int32> result;      
+   //   result.push_back(best_cost_[node->state].second.graphone.second);
+   //   int32 c = 0; 
+   //   while (node_next_id != -1) {
+   //     c += 1;
+   //     auto node_next = nodes_visited_[node_next_id];
+   //     int32 pos1 = node_next->state.pos; 
+   //     SourceInfo source_info = best_cost_[node_next->state].second;
+   //     node_next_id = source_info.node_id;
+   //     int32 phoneme = source_info.graphone.second;
+   //     if (phoneme != eps_) {
+   //       result.insert(result.begin(), phoneme);
+   //     }
+   //   }
+   //   for (auto x: nodes_all_) {
+   //     delete x;
+   //   }
+   //   results->push_back(std::pair<std::vector<int32>, float>(result, 1.0));
+   //   nodes_visited_.clear();
+   //   nodes_all_.clear();
+   //   std::cout << "number of de-queue operations during decoding: " << counts << std::endl;
+   //   return;
+
     }
-    int32 hist_len = std::min(ngram_order_-1, std::min(static_cast<int32>(node.phones.size()), node.pos+1));
+
+    int32 hist_len = std::min(ngram_order_-1, std::min(static_cast<int32>(node->state.phone_hist.size()), node->state.pos+1));
     // Construct the history vector.
     HistType h;
     if ((hist_len) > 0) {
       for (int32 i = 0; i < hist_len; i++) {
-        assert(node.pos-i < word.size());
-        assert(node.pos-i >= 0);
-        h.insert(h.begin(), std::pair<int32, int32>(word[node.pos-i], node.phones[node.phones.size()-1-i]));
+        assert(node->state.pos-i < word.size());
+        assert(node->state.pos-i >= 0);
+        h.insert(h.begin(), std::pair<int32, int32>(word[node->state.pos-i], node->state.phone_hist[node->state.phone_hist.size()-1-i]));
       }
     }
-    std::vector<int32> ngram(node.phones.end()-std::min(ngram_order_, static_cast<int32>(node.phones.size())), node.phones.end());
-    if (node.cost < best_cost[node.pos][ngram]) continue;
-    if (node.pos == word.size()-2) {
+    if (std::find_if(nodes_visited_.begin(), nodes_visited_.end(), [node](Node* n){return n == node;}) != nodes_visited_.end()) continue;
+    
+    nodes_visited_.push_back(node);
+    // if (node.cost < best_cost_[node.pos][ngram]) continue;
+    if (node->state.pos == word.size()-2) {
       std::pair<int32, int32> g(eos_, eos_);
-      Enqueue(node, g, h, heuristics, &best_cost, &q, &num_active, &beam_width);
+      Enqueue(*node, g, h, heuristics, &q, &num_active, &beam_width);
     } else {
-      std::pair<int32, int32> g(word[node.pos+1], eps_);
-      Enqueue(node, g, h, heuristics, &best_cost, &q, &num_active, &beam_width);
+      std::pair<int32, int32> g(word[node->state.pos+1], eps_);
+      Enqueue(*node, g, h, heuristics, &q, &num_active, &beam_width);
       for (int32 p = 1; p <= num_phonemes_; p++) {
-        std::pair<int32, int32> g(word[node.pos+1], p);
-        Enqueue(node, g, h, heuristics, &best_cost, &q, &num_active, &beam_width);
+        std::pair<int32, int32> g(word[node->state.pos+1], p);
+        Enqueue(*node, g, h, heuristics, &q, &num_active, &beam_width);
       }
     }
     for (int32 p = 1; p <= num_phonemes_; p++) {
       std::pair<int32, int32> g(eps_, p);
-      Enqueue(node, g, h, heuristics, &best_cost, &q, &num_active, &beam_width);
+      Enqueue(*node, g, h, heuristics, &q, &num_active, &beam_width);
     }
   }
+  
+  while (!q2.empty()) {
+    counts += 1;
+    Hyp hyp = q2.top();
+    q2.pop();
+    auto state = hyp.node->state;
+    if (graph_[state].size() == 0) {
+      assert(best_cost_[state].second.node_id == -1 && state.pos == 0 && best_cost_[state].second.graphone.second == bos_);
+      std::vector<int32> result(hyp.phone_seq);
+      result.insert(result.begin(), bos_);
+      if (std::find_if(results->begin(), results->end(), [result](std::pair<std::vector<int32>, float> r){return IntVectorHasher()(r.first) == IntVectorHasher()(result);}) != results->end()) continue;
+      // Rescore the decoding result by doing one pass of forward computation.
+      float post = Exp(ForwardBackward(word, result, ngram_order_-1, true));
+      results->push_back(std::pair<std::vector<int32>, float>(result, post));
+      prob_mass_tot += post;
+      if (results->size() == num_variants_ * 2) break;
+    } else {
+      for (int32 i = 0; i < graph_[state].size(); i++) {
+        SourceInfo source_info = graph_[state][i];
+        float fcost = hyp.fcost + source_info.arc_cost;
+        std::vector<int32> phone_seq(hyp.phone_seq);
+        int32 p = source_info.graphone.second;
+        if (p != eps_)
+          phone_seq.insert(phone_seq.begin(), p);
+        q2.push(Hyp(fcost, phone_seq, nodes_visited_[source_info.node_id]));
+      }
+    }
+  }
+  for (int32 i = 0; i < results->size(); i++) {
+    (*results)[i].second /= prob_mass_tot;
+  }
+  std::sort(results->begin(), results->end(), CompareResult());
+  for (auto x: nodes_all_) {
+    delete x;
+  }
+  nodes_visited_.clear();
+  nodes_all_.clear();
+  graph_.clear();
+  best_cost_.clear();
+  return;
 }
 
 /// Read sequences of integers (must be separated by spaces) from a file. 
@@ -451,11 +532,11 @@ void G2PModel::UpdateProb(const int32 order) {
       if (den < 1e-20f) continue;
       float backoff_prob = discounts_tot / den;
       HistType h_reduced(h.begin()+1, h.end());
+      auto it3 = prob_[order-1].find(h_reduced);
       for (auto it2 = counts_[order][h].begin();
            it2 != counts_[order][h].end(); ++it2) {
         // the probability of the lower order model, given the reduced history.
         float p_lower = 0.0f;
-        auto it3 = prob_[order-1].find(h_reduced);
         if (it3 != prob_[order-1].end()) {
           auto it4 = it3->second.find(it2->first);
           if (it4 != it3->second.end())
@@ -524,49 +605,72 @@ void G2PModel::ComputeBoundMatrix() {
 void G2PModel::Enqueue(const Node& node, const std::pair<int32, int32>& g,
                        const HistType& h,
                        const std::vector<float>& heuristics,
-                       BestCostType* best_cost, QueueType* q,
+                       ForwardQueueType* q,
                        std::vector<int32>* num_active,
                        std::vector<float>* beam_width) {
-  float cost_new = Log(GetProb(h.size(), h, g)) + node.cost;
-  std::vector<int32> phones_new(node.phones);
-  if (g.second != eps_) {
-    phones_new.push_back(g.second);
-  } 
-  int32 pos_new = node.pos;
+  float logp = Log(GetProb(h.size(), h, g));
+  float fcost_new = logp + node.fcost;
+  float bcost_new = node.bcost;
+  std::vector<int32> phone_hist_new(node.state.phone_hist);
+  
+  if (g.second == eos_) assert(g.first == eos_);
+  if (g.first == eos_) assert(g.second == eos_);
+  if (g.second != eos_) assert(phone_hist_new[phone_hist_new.size()-1] != eos_);
+  if (g.second != eps_)
+    phone_hist_new.push_back(g.second);
+
+  if (phone_hist_new.size() > ngram_order_-1)
+    phone_hist_new.erase(phone_hist_new.begin());
+
+  int32 pos_new = node.state.pos;
   if (g.first != eps_) {
     pos_new += 1;
-    cost_new -= heuristics[node.pos];
-    float p = GetProb(h.size(), h, g);
-    if (!(Log(p)-heuristics[node.pos] < 1e-5f)) {
-      std::cout << "warning: log prob larger than heuristics: " << Log(p) << " " << heuristics[node.pos] << std::endl;
-      assert(Log(p)-heuristics[node.pos] < 1e-5f);
-    }
+    bcost_new -= heuristics[node.state.pos];
+  //  float p = GetProb(h.size(), h, g);
+  //  if (!(Log(p)-heuristics[node.pos] < 1e-5f)) {
+  //    std::cout << "warning: log prob larger than heuristics: " << Log(p) << " " << heuristics[node.pos] << std::endl;
+  //    assert(Log(p)-heuristics[node.pos] < 1e-5f);
+  //  }
   }
   // We only enqueue a Node if the cost is better than before with the same
   // (phoneme-sequence, word-position), and the number of Nodes in the queue
   // with the same word-position is smaller than max_num_active_nodes.
-  std::vector<int32> ngram(phones_new.end()-h.size()-1, phones_new.end());
-  auto it = best_cost->find(pos_new);
-  if (it == best_cost->end() ||
-      it->second.find(ngram) == it->second.end() ||
-      cost_new > it->second[ngram]){
-    (*best_cost)[pos_new][ngram] = cost_new;
-    Node node_new(pos_new, phones_new, cost_new);
+  State s(pos_new, phone_hist_new);
+  SourceInfo source_info(nodes_visited_.size()-1, g, logp); // backpointer to the source state.
+  auto it = best_cost_.find(s);
+  if (it == best_cost_.end()) {
+    Node *node_new = new Node(s, fcost_new, bcost_new);
+    nodes_all_.insert(node_new);
+    q->push(std::pair<float, Node*>(fcost_new+bcost_new, node_new));
+    best_cost_[s] = std::pair<Node*, SourceInfo>(node_new, source_info); 
+  } else if (fcost_new > it->second.first->fcost) {
+    auto node_to_update = it->second.first;
+    node_to_update->fcost = fcost_new;
+    node_to_update->bcost = bcost_new;
+    it->second.second = source_info; 
+  }
+  auto it2 = graph_.find(s);
+  if (it2 == graph_.end()) {
+    std::vector<SourceInfo> sources;
+    sources.push_back(source_info);
+    graph_[s] = sources; 
+  } else {
+    graph_[s].push_back(source_info); 
+  }
 
-    if ((*num_active)[node_new.pos] < max_num_active_nodes_) {
+  //  if ((*num_active)[node_new.pos] < max_num_active_nodes_) {
       
       // std::cout << (*num_active)[node_new.pos] << " " <<  max_num_active_nodes_ << std::endl;
-      q->push(node_new);
-      (*num_active)[node_new.pos] += 1;
-      if (cost_new > (*beam_width)[node_new.pos])
-        (*beam_width)[node_new.pos] = cost_new;
-    } else if (cost_new > (*beam_width)[node_new.pos]) {
+    //  (*num_active)[node_new->state.pos] += 1;
+    //  if (cost_new > (*beam_width)[node_new->state.pos])
+    //    (*beam_width)[node_new->state.pos] = cost_new;
+ //   } else if (cost_new > (*beam_width)[node_new.pos]) {
       // std::cout << " the current node's cost " << cost_new << "is better than the beam width. " << (*beam_width)[node_new.pos] << std::endl;
       // q->push(node_new);
-    } else {
+ //   } else {
      // std::cout << " the current node's cost " << cost_new << "is worse than the beam width. " << (*beam_width)[node_new.pos] << std::endl;
-    }
-  }
+ //   }
+ // }
 }
 
 void G2PModel::WriteProb(std::ostream &os, bool binary) const {
