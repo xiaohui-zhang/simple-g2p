@@ -26,6 +26,7 @@ G2PModel::G2PModel(int32 ngram_order, int32 num_graphemes, int32 num_phonemes) {
   ngram_order_ = ngram_order;
   bos_ = -3;
   eos_ = -2;
+  backoff_symbol_ = std::pair<int32, int32>(-1, -1);
   eps_ = 0; // following the OpenFst convention.
   num_graphemes_ = num_graphemes;
   num_phonemes_ = num_phonemes;
@@ -56,6 +57,7 @@ G2PModel::G2PModel(int32 ngram_order, float discounting_constant_min,
   ngram_order_ = ngram_order;
   bos_ = -3;
   eos_ = -2;
+  backoff_symbol_ = std::pair<int32, int32>(-1, -1);
   eps_ = 0; // following the OpenFst convention.
   num_graphemes_ = num_graphemes;
   num_phonemes_ = num_phonemes;
@@ -109,7 +111,8 @@ void G2PModel::Train(int32 num_threads) {
       counts_[o].clear();
       for(int32 i = 0; i < num_threads; i++) {
         // std::cout << word_subsets[i].size() << std::endl;
-        threads[i] = std::thread(ForwardBackwardStatic, this, word_subsets[i], pron_subsets[i], o, &(counts[i]), &(log_like[i]));
+        threads[i] = std::thread(ForwardBackwardStatic, this, word_subsets[i],
+                                 pron_subsets[i], o, &(counts[i]), &(log_like[i]));
       }
       for (int32 i = 0; i < num_threads; i++) {
         threads[i].join();
@@ -193,6 +196,7 @@ void G2PModel::Decode(const std::vector<int32>& word,
   best_cost_[state0] = std::pair<Node*, SourceInfo>(node0, source_info0);
   graph_[state0] = std::vector<SourceInfo>();
 
+  // The queue we use for the first pass A-star decoding.
   ForwardQueueType q;
   q.push(std::pair<float, Node*>(sum_heuristics, node0));
   num_active[0] += 1;
@@ -200,23 +204,30 @@ void G2PModel::Decode(const std::vector<int32>& word,
   int32 counts = 0;
   float prob_mass_tot = 0.0f;
   
+  // The queue we use for the second pass A-star decoding (back-tracing).
   BackTraceQueueType q2;
 
   while (!q.empty()) {
     counts += 1;
-
     std::pair<float, Node*> node_with_cost = q.top();
     q.pop();
     auto node = node_with_cost.second;
     num_active[node->state.pos] -= 1;
-    if (node_with_cost.first != node->fcost + node->bcost) continue;
+    // We have visited this node before. So skip it this next.
+    if (std::find_if(nodes_visited_.begin(), nodes_visited_.end(), 
+        [node](Node* n){return n == node;}) != nodes_visited_.end()) continue;
+
     // We have updated the cost of the same node in a former en-queue operation.
-    // So we are skipping visiting this node for now to avoid duplicated visits.
-    if (node->state.phone_hist[node->state.phone_hist.size()-1] == eos_) 
-      assert(node->state.pos == word.size()-1);
+    // So we won't visit this node for now, to avoid duplicated visits.
+    if (node_with_cost.first != node->fcost + node->bcost) continue; 
+    
+    // We have reached an "end node".
     if (node->state.pos == word.size()-1) {
       assert(node->state.phone_hist[node->state.phone_hist.size()-1] == eos_);
       q2.push(Hyp(0.0,  std::vector<int32>(), node));
+      // Quit the first pass decoding one we have reached num_variants_
+      // different end nodes, which makes sure that we can get at least
+      // num_varaints_ different decoding results during back-tracing. 
       if (q2.size() == num_variants_)
         break;
       continue;
@@ -245,23 +256,25 @@ void G2PModel::Decode(const std::vector<int32>& word,
    //   nodes_all_.clear();
    //   std::cout << "number of de-queue operations during decoding: " << counts << std::endl;
    //   return;
-
     }
 
-    int32 hist_len = std::min(ngram_order_-1, std::min(static_cast<int32>(node->state.phone_hist.size()), node->state.pos+1));
-    // Construct the history vector.
+    int32 hist_len = std::min(ngram_order_-1, 
+      std::min(static_cast<int32>(node->state.phone_hist.size()), node->state.pos+1));
+    // Construct the graphone history vector (because we only store the phoneme histories).
     HistType h;
     if ((hist_len) > 0) {
       for (int32 i = 0; i < hist_len; i++) {
-        assert(node->state.pos-i < word.size());
-        assert(node->state.pos-i >= 0);
-        h.insert(h.begin(), std::pair<int32, int32>(word[node->state.pos-i], node->state.phone_hist[node->state.phone_hist.size()-1-i]));
+        // assert(node->state.pos-i < word.size());
+        // assert(node->state.pos-i >= 0);
+        h.insert(h.begin(), std::pair<int32, int32>(word[node->state.pos-i], 
+                 node->state.phone_hist[node->state.phone_hist.size()-1-i]));
       }
     }
-    if (std::find_if(nodes_visited_.begin(), nodes_visited_.end(), [node](Node* n){return n == node;}) != nodes_visited_.end()) continue;
     
+    // Mark the current node as visited.
     nodes_visited_.push_back(node);
-    // if (node.cost < best_cost_[node.pos][ngram]) continue;
+    
+    // Construct arcs emitting from the current node, construct new nodes, and en-queue them. 
     if (node->state.pos == word.size()-2) {
       std::pair<int32, int32> g(eos_, eos_);
       Enqueue(*node, g, h, heuristics, &q, &num_active, &beam_width);
@@ -278,26 +291,39 @@ void G2PModel::Decode(const std::vector<int32>& word,
       Enqueue(*node, g, h, heuristics, &q, &num_active, &beam_width);
     }
   }
-  
+
+  // The second pass A-star decoding (back-tracing).
   while (!q2.empty()) {
     counts += 1;
+    // The basic data structure in the second pass decoding is Hyp rather than
+    // Node in the second pass decoding. See g2p_utils.h for more details.
     Hyp hyp = q2.top();
     q2.pop();
     auto state = hyp.node->state;
+    // No source node means we have reached the start node.
     if (graph_[state].size() == 0) {
-      assert(best_cost_[state].second.node_id == -1 && state.pos == 0 && best_cost_[state].second.graphone.second == bos_);
+      // For debugging.
+      // assert(best_cost_[state].second.node_id == -1 && state.pos == 0 && best_cost_[state].second.graphone.second == bos_);
       std::vector<int32> result(hyp.phone_seq);
       result.insert(result.begin(), bos_);
-      if (std::find_if(results->begin(), results->end(), [result](std::pair<std::vector<int32>, float> r){return IntVectorHasher()(r.first) == IntVectorHasher()(result);}) != results->end()) continue;
+      // Skip duplicated decoding results.
+      if (std::find_if(results->begin(), results->end(), [result](std::pair<std::vector<int32>, 
+          float> r){return IntVectorHasher()(r.first) == IntVectorHasher()(result);}) != results->end()) continue;
       // Rescore the decoding result by doing one pass of forward computation.
       float post = Exp(ForwardBackward(word, result, ngram_order_-1, true));
       results->push_back(std::pair<std::vector<int32>, float>(result, post));
       prob_mass_tot += post;
+      // We quit the decoding process once we have 2 * num_variants_ candidate results.
       if (results->size() == num_variants_ * 2) break;
     } else {
+      // We have recorded the source nodes (and info one the arcs) with perfect rest
+      // cost in the first pass decoding, so we can easily expand the hypothesis (Hyp)
+      // backward, and push them into the queue.
       for (int32 i = 0; i < graph_[state].size(); i++) {
         SourceInfo source_info = graph_[state][i];
+        // Increase the forward cost by the cost of the arc.
         float fcost = hyp.fcost + source_info.arc_cost;
+        // Expand the decoded phone sequence associated in the current hypothesis.
         std::vector<int32> phone_seq(hyp.phone_seq);
         int32 p = source_info.graphone.second;
         if (p != eps_)
@@ -306,9 +332,11 @@ void G2PModel::Decode(const std::vector<int32>& word,
       }
     }
   }
+  // Normalize the posteriors, and clean up variables.
   for (int32 i = 0; i < results->size(); i++) {
     (*results)[i].second /= prob_mass_tot;
   }
+  // Sort the n-best list by the posteriors.
   std::sort(results->begin(), results->end(), CompareResult());
   for (auto x: nodes_all_) {
     delete x;
@@ -353,19 +381,27 @@ void G2PModel::ReadSequences(int32 vocab_size, char* file, std::vector<std::vect
 float G2PModel::GetProb(const int32& order, // ngram order. 0 == unigram
                         const HistType& h, // history
                         const std::pair<int32, int32>& g) { //graphone
-  assert(h.size() <= order);
+  assert(order >= 0 && h.size() <= order && g != backoff_symbol_);
   auto it = prob_[order].find(h);
-  if (it == prob_[order].end() ||
-      it->second.find(g) == it->second.end()) {
+  if (it == prob_[order].end()) {
+    // back off to an lower order history.
+    HistType h_reduced(h);
+    if (h.size() == order) {
+      h_reduced.erase(h_reduced.begin());
+    }
+    return GetProb(order-1, h_reduced, g);
+  } else if (it->second.find(g) == it->second.end()) {
     if (order == 0) {
-      return 1e-37f;
+      return 0.0f;
     } else {
       // back off to an lower order history.
       HistType h_reduced(h);
       if (h.size() == order) {
         h_reduced.erase(h_reduced.begin());
       }
-      return GetProb(order-1, h_reduced, g);
+      assert(it->second.find(backoff_symbol_) != it->second.end());
+      float p = it->second[backoff_symbol_] * GetProb(order-1, h_reduced, g);
+      return (p > 1e-37f ? p : 1e-37f);
     }
   }
   // We always assign a small probability mass to zero-prob events.
@@ -390,6 +426,7 @@ float G2PModel::ForwardBackward(const std::vector<int>& word,
   beta.resize(word.size(), std::vector<float>(pron.size(), 0.0f));
   HistType h;
   hist.resize(word.size(), std::vector<HistType >(pron.size(), h));
+  // Forward pass
   for (int32 i = 0; i < word.size(); i++) {
     for (int32 j = 0; j < pron.size(); j++) {
       // std::cout << i << " OOO " << j << std::endl;
@@ -430,9 +467,10 @@ float G2PModel::ForwardBackward(const std::vector<int>& word,
       }
     } 
   }
-  // std::cout << "last alpha " << alpha[word.size()-1][pron.size()-1] << std::endl; 
   float log_like = alpha[word.size()-1][pron.size()-1];
   if (skip_backward) return log_like;
+  
+// Backward pass
   for (int32 i = word.size()-1; i >= 0; i--) {
     for (int32 j = pron.size()-1; j >= 0; j--) {
       if (i == word.size()-1 && j == pron.size()-1) {
@@ -494,7 +532,7 @@ void G2PModel::MergeCount(CountType& counts, const int32& order) {
   }
 } 
  
-/// Update the model represented by prob_, using the accumulated n-gram counts.
+/// Do EM-update of the model represented by prob_, using the accumulated n-gram counts.
 /// The standard Kneyser-Ney smooting is used. 
 void G2PModel::UpdateProb(const int32 order) {
   float tot_counts = 0.0f;
@@ -504,9 +542,18 @@ void G2PModel::UpdateProb(const int32 order) {
          it != counts_[0][h_0].end(); ++it) {
       tot_counts += it->second;
     };
-    for (auto it = counts_[0][h_0].begin();
-         it != counts_[0][h_0].end(); ++it) {
-        prob_[0][h_0][it->first] = it->second / tot_counts;
+    prob_[0][h_0].clear();
+ //   for (auto it = counts_[0][h_0].begin();
+ //        it != counts_[0][h_0].end(); ++it) {
+ //       prob_[0][h_0][it->first] = it->second / tot_counts;
+ //   }
+    for (int32 i = 0; i < graphones_.size(); i++) {
+      std::pair<int32, int32> g(graphones_[i]);
+      if (counts_[0][h_0].find(g) == counts_[0][h_0].end()) {
+        prob_[0][h_0][g] = 0.0f;
+      } else {
+        prob_[0][h_0][g] = counts_[0][h_0][g] / tot_counts;
+      }
     }
   } else {
     for(CountType::iterator it1 = counts_[order].begin();
@@ -531,6 +578,8 @@ void G2PModel::UpdateProb(const int32 order) {
       /// is too small, cause it's not numerically trustworthy.
       if (den < 1e-20f) continue;
       float backoff_prob = discounts_tot / den;
+      prob_[order][h].clear();
+      prob_[order][h][backoff_symbol_] = backoff_prob;
       HistType h_reduced(h.begin()+1, h.end());
       auto it3 = prob_[order-1].find(h_reduced);
       for (auto it2 = counts_[order][h].begin();
@@ -542,7 +591,7 @@ void G2PModel::UpdateProb(const int32 order) {
           if (it4 != it3->second.end())
             p_lower = it4->second; 
         }
-        prob_[order][h][it2->first] = counts_[order][h][it2->first] / den + backoff_prob * p_lower;
+        prob_[order][h][it2->first] = it2->second / den + backoff_prob * p_lower;
       }
     }
   }
@@ -618,7 +667,7 @@ void G2PModel::Enqueue(const Node& node, const std::pair<int32, int32>& g,
   if (g.second != eos_) assert(phone_hist_new[phone_hist_new.size()-1] != eos_);
   if (g.second != eps_)
     phone_hist_new.push_back(g.second);
-
+  
   if (phone_hist_new.size() > ngram_order_-1)
     phone_hist_new.erase(phone_hist_new.begin());
 
@@ -626,10 +675,9 @@ void G2PModel::Enqueue(const Node& node, const std::pair<int32, int32>& g,
   if (g.first != eps_) {
     pos_new += 1;
     bcost_new -= heuristics[node.state.pos];
-  //  float p = GetProb(h.size(), h, g);
-  //  if (!(Log(p)-heuristics[node.pos] < 1e-5f)) {
-  //    std::cout << "warning: log prob larger than heuristics: " << Log(p) << " " << heuristics[node.pos] << std::endl;
-  //    assert(Log(p)-heuristics[node.pos] < 1e-5f);
+  // For debugging.
+  //  if (!(logp-heuristics[node.pos] < 1e-5f)) {
+  //    std::cerr << "warning: the log prob is larger than heuristics: " << logp << " " << heuristics[node.pos] << std::endl;
   //  }
   }
   // We only enqueue a Node if the cost is better than before with the same
@@ -648,6 +696,7 @@ void G2PModel::Enqueue(const Node& node, const std::pair<int32, int32>& g,
     node_to_update->fcost = fcost_new;
     node_to_update->bcost = bcost_new;
     it->second.second = source_info; 
+    q->push(std::pair<float, Node*>(fcost_new+bcost_new, node_to_update));
   }
   auto it2 = graph_.find(s);
   if (it2 == graph_.end()) {

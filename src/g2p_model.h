@@ -157,9 +157,12 @@ class G2PModel {
   int32 eos_;
   /// Epsilon symbol.
   int32 eps_;
-  // Grapheme ids must be contiguous integers from 0 to num_graphemes_ - 1.
+  /// Back-off symbol (we define it as a pair because the key of the map from
+  /// graphones to probs must be pairs).
+  std::pair<int32, int32> backoff_symbol_;
+  /// Grapheme ids must be contiguous integers from 0 to num_graphemes_ - 1.
   int32 num_graphemes_;
-  // Phoneme ids must be contiguous integers from 0 to num_phonemes_ - 1.
+  /// Phoneme ids must be contiguous integers from 0 to num_phonemes_ - 1.
   int32 num_phonemes_;
   /// Discounting constant in Kneser-Ney smooting. Must be >=0 and <1.
   std::vector<float> discounting_constants_;
