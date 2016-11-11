@@ -21,7 +21,7 @@
 
 #include "g2p_model.h"
 
-// Constructor for test
+// Constructor for test.
 G2PModel::G2PModel(int32 ngram_order, int32 num_graphemes, int32 num_phonemes) {
   ngram_order_ = ngram_order;
   bos_ = -3;
@@ -45,6 +45,7 @@ G2PModel::G2PModel(int32 ngram_order, int32 num_graphemes, int32 num_phonemes) {
   counts_.resize(ngram_order);
 }
 
+// Constructor for training.
 G2PModel::G2PModel(int32 ngram_order, float discounting_constant_min, 
                    float discounting_constant_max, int32 num_graphemes, int32 num_phonemes,
                    char* words_file, char* prons_file) {
@@ -119,14 +120,8 @@ void G2PModel::Train(int32 num_threads) {
         log_like_tot += log_like[i];
         MergeCount(counts[i], o);
       }
-    // Baseline for debugging (no multi-threading)
-    // CountType counts;
-    // for(int32 i = 0; i < words_.size(); i++) {
-    //   log_like_tot += ForwardBackward(words_[i], prons_[i], o, false, &counts);
-    // }
-    // MergeCount(counts, o);
       log_like_tot /= static_cast<float>(words_.size());
-      std::cout << "order " << o << " log like is " << log_like_tot << std::endl;
+      std::cout << "order " << o << " log likelihood on training data is " << log_like_tot << std::endl;
       // The stopping condition relies on the change in log-likelihood.
       if (fabs(log_like_tot - log_like_last) < 0.1) break;
       log_like_last = log_like_tot;
@@ -373,7 +368,6 @@ void G2PModel::ReadSequences(int32 vocab_size, char* file, std::vector<std::vect
     }
     symbols.push_back(eos_);
     sequences->push_back(symbols);
-    // std::cout << "end reading word" << std::endl;
   }
 }
 
@@ -392,7 +386,7 @@ float G2PModel::GetProb(const int32& order, // ngram order. 0 == unigram
     return GetProb(order-1, h_reduced, g);
   } else if (it->second.find(g) == it->second.end()) {
     if (order == 0) {
-      return 0.0f;
+      return 1e-37f;
     } else {
       // back off to an lower order history.
       HistType h_reduced(h);
@@ -429,7 +423,6 @@ float G2PModel::ForwardBackward(const std::vector<int>& word,
   // Forward pass
   for (int32 i = 0; i < word.size(); i++) {
     for (int32 j = 0; j < pron.size(); j++) {
-      // std::cout << i << " OOO " << j << std::endl;
       HistType h_temp;
       if (i == 0 && j == 0) {
         alpha[i][j] = 0.0f;
@@ -463,7 +456,6 @@ float G2PModel::ForwardBackward(const std::vector<int>& word,
         int32 l = h_temp.size(); 
         if (l > order) start = l - order;
         hist[i][j] = HistType(h_temp.begin()+start, h_temp.end()); 
-        // std::cout << i << " " << j << " " << alpha[i][j] << std::endl;
       }
     } 
   }
@@ -543,17 +535,9 @@ void G2PModel::UpdateProb(const int32 order) {
       tot_counts += it->second;
     };
     prob_[0][h_0].clear();
- //   for (auto it = counts_[0][h_0].begin();
- //        it != counts_[0][h_0].end(); ++it) {
- //       prob_[0][h_0][it->first] = it->second / tot_counts;
- //   }
-    for (int32 i = 0; i < graphones_.size(); i++) {
-      std::pair<int32, int32> g(graphones_[i]);
-      if (counts_[0][h_0].find(g) == counts_[0][h_0].end()) {
-        prob_[0][h_0][g] = 0.0f;
-      } else {
-        prob_[0][h_0][g] = counts_[0][h_0][g] / tot_counts;
-      }
+    for (auto it = counts_[0][h_0].begin();
+         it != counts_[0][h_0].end(); ++it) {
+        prob_[0][h_0][it->first] = it->second / tot_counts;
     }
   } else {
     for(CountType::iterator it1 = counts_[order].begin();
