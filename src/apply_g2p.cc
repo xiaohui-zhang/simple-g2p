@@ -22,7 +22,7 @@
 int main(int argc, char **argv) {
   // arguments: ngram_order, num_graphemes, num_phonemes, input_model, test_words, predicted_prons.
   G2PModel mdl(atoi(argv[1]), atoi(argv[2]), atoi(argv[3])); 
-  mdl.Read(argv[4], false);
+  mdl.Read(argv[4], true);
   mdl.Test(argv[5], argv[6], 1, atoi(argv[7]));
   return 0;
 }

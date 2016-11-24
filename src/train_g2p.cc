@@ -23,6 +23,6 @@ int main(int argc, char **argv) {
   // arguments: ngram_order, discouting_constant_min, discounting_constant_max, num_graphemes, num_phonemes, training words, training prons, num_threads, output_model
   G2PModel mdl(atoi(argv[1]), atof(argv[2]), atof(argv[3]), atoi(argv[4]), atoi(argv[5]), argv[6], argv[7]); 
   mdl.Train(atoi(argv[8]));
-  mdl.Write(argv[9], false);
+  mdl.Write(argv[9], true);
   return 0;
 }
