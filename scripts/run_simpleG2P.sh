@@ -66,12 +66,12 @@ cat $dir/lexicon_subset | head -n $num_train | cut -f2- -d' ' | \
   $dir/phoneme2int - > $dir/prons
 
 # Prepare test data
-cat $dir/lexicon_subset | head -n-$num_train | cut -f1 -d' ' > $dir/test_words.txt
+cat $dir/lexicon_subset | tail -n +$[$num_train+1]| cut -f1 -d' ' > $dir/test_words.txt
 cat $dir/test_words.txt | sed 's/./& /g' | \
   awk 'NR==FNR{a[$1] = $2; next} {if ($1 in a) printf a[$1]; for (n=2;n<=NF;n++) if ($n in a) printf(" "a[$n]); printf("\n");}' \
   $dir/grapheme2int - > $dir/test_words
 
-cat $dir/lexicon_subset | tail -10 | cut -f2- -d' ' > $dir/test_prons.txt
+cat $dir/lexicon_subset | tail -n +$[$num_train+1] | cut -f2- -d' ' > $dir/test_prons.txt
 cat $dir/test_prons.txt | \
   awk 'NR==FNR{a[$1] = $2; next} {if ($1 in a) printf a[$1]; for (n=2;n<=NF;n++) if ($n in a) printf(" "a[$n]); printf("\n");}' \
   $dir/phoneme2int - > $dir/test_prons

@@ -20,6 +20,8 @@
 
 
 #include "g2p_model.h"
+#include "g2p_io.h"
+#include "g2p_io_inl.h"
 
 // Constructor for test.
 G2PModel::G2PModel(int32 ngram_order, int32 num_graphemes, int32 num_phonemes) {
@@ -78,6 +80,12 @@ G2PModel::G2PModel(int32 ngram_order, float discounting_constant_min,
   }
   graphones_.push_back(std::pair<int32, int32>(eos_, eos_));
   prob_.resize(ngram_order);
+  HistType h0;
+  prob_[0][h0][std::pair<int32, int32>(-1,-1)] = 0.1;
+  // prob_[1][h0][std::pair<int32, int32>(-1,-1)] = 0.1;
+  h0.push_back(std::pair<int32, int32>(-3, -3));
+  prob_[1][h0][std::pair<int32, int32>(-1,-1)] = 0.1;
+  
   counts_.resize(ngram_order);
 }
 
@@ -140,9 +148,11 @@ void G2PModel::Test(char* test_words_file, char* output,
   std::ofstream os(output);
   max_num_active_nodes_ = max_num_active_nodes;
   num_variants_ = num_variants;
+  std::cout << "num_variantes is: " << num_variants_ << std::endl;
   for (int32 i = 0; i < test_words.size(); i++) {
     std::vector<std::pair<std::vector<int32>, float> > results;
     Decode(test_words[i], &results);
+    std::cout << "results' size is: " << results.size() << std::endl;
     for (int32 j = 0; j < num_variants_; j++) {
       for (int32 k = 1; k < test_words[i].size()-1; k++) {
         os << test_words[i][k] << " ";
@@ -706,111 +716,167 @@ void G2PModel::Enqueue(const Node& node, const std::pair<int32, int32>& g,
  // }
 }
 
+// Test the Read and Write functions. 
+void G2PModel::TestWriteRead(char* file, bool binary) {
+  Write(file, binary);
+  PrintWrite();
+
+  std::ifstream f1;
+  f1.open(file);
+  ReadProb(f1, binary, &prob_);
+  PrintRead(&prob_);
+  f1.close();
+}
+
+// This function writes prob_ into model file.
 void G2PModel::WriteProb(std::ostream &os, bool binary) const {
   if (!os.good()) {
     std::cerr << "Failure writing probs to stream.\n";
   }
-  if (binary) {
- 
-  } else { // text mode.
-    for (int32 o = 0; o < ngram_order_; o++) {
-      // iterate the hashmap of vector of int pairs (history) and dict of graphone vs. prob
-      os << "{";
-      CountType::const_iterator it = prob_[o].begin();
-      for (; it != prob_[o].end(); ++it) {
-        // write history
-        os << "( ";
-        std::vector<std::pair<int32, int32> >::const_iterator it_v = (it->first).begin();
-        // empty pair represents empty history
-        if (it_v == (it->first).end()) {
-          os << "( " << ") ";
-        }
-        for (; it_v != (it->first).end(); ++it_v) {
-          os << "( " << it_v ->first << " " << it_v ->second << " ) ";
-        }
-        os << ") ";
-        // write hashmap of graphone and prob
-        os << " {";
-        Graphone2ProbType::const_iterator it_gp = (it->second).begin();
-        for (; it_gp != (it->second).end(); ++it_gp) {
-          // write graphone
-          os << " ( ";
-          os << "( " << (it_gp->first).first << " " << (it_gp->first).second << " ) ";
-          // write prob
-          os << it_gp->second << " )";
-        }
-        os << "}";
+  for (int32 o = 0; o < ngram_order_; o++) {
+    // Write each ngram-order
+    WriteToken(os, binary, "<NgramOrder>");
+    WriteBasicType(os, binary, static_cast<int32>(o));
+    // Write prob size
+    WriteToken(os, binary, "<ProbSize>");
+    WriteBasicType(os, binary, static_cast<int32>(prob_[o].size()));
+    // Write each history and graphone2prob map
+    for (CountType::const_iterator iter = prob_[o].begin(); iter != prob_[o].end(); iter++) {
+      // Write history size
+      WriteToken(os, binary, "<HistorySize>");
+      WriteBasicType(os, binary, static_cast<int32>((iter->first).size()));
+      // Write history
+      WriteToken(os, binary, "<History>");
+      WriteIntegerPairVector(os, binary, iter->first);
+      // Write graphone2prob map size
+      WriteToken(os, binary, "<Graphone2ProbMapSize>");
+      WriteBasicType(os, binary, static_cast<int32>((iter->second).size()));
+      // Write graphone2prob map
+      WriteToken(os, binary, "<Graphone2ProbMap>");
+      for (Graphone2ProbType::const_iterator iter2 = (iter->second).begin(); iter2 != (iter->second).end(); iter2++) {
+        // Write graphone 
+        std::vector<std::pair<int32, int32> > graphone;
+        graphone.push_back(iter2->first);
+        WriteIntegerPairVector(os, binary, graphone);
+        // Write probability of a graphone given a certain history
+        WriteBasicType(os, binary, iter2->second);
       }
-      os << "} ";
     }
   }
 }
 
-void G2PModel::ReadProb(std::istream &is, bool binary, std::vector<CountType>* prob) {
+// This function reads prob_ from model file
+void G2PModel::ReadProb(std::istream &is, bool binary, std::vector<CountType> *prob) {
   if (is.fail()) {
     std::cerr << "Failure reading from input.\n";
   }
-  if (binary) {
-  
-  } else { //text mode.
-    (*prob).resize(ngram_order_);
-    for (int32 order = 1; order <= ngram_order_; order++) {
-      char ch;
-      is >> ch;
-      assert(ch == '{');
-      // std::cout << "symbol should be '{' " << ch << std::endl;
-      // std::cout << "current order is " << order << std::endl;
-      while(is.peek() != '}') {
-        HistType h;
-        Graphone2ProbType v;
-        ReadHistory(is, binary, &h, order);
-        ReadGraphone2ProbMap(is, binary, &v);
-        (*prob)[order-1][h] = v;
+  assert(ngram_order_ > 0);
+  (*prob).resize(ngram_order_);
+  for (int32 o = 0; o < ngram_order_; o++) {
+    // Read each ngram-order
+    ExpectToken(is, binary, "<NgramOrder>");
+    ReadBasicType(is, binary, &o);
+    // Read prob size
+    ExpectToken(is, binary, "<ProbSize>");
+    int32 prob_size;
+    ReadBasicType(is, binary, &prob_size);
+    // Read each history and graphone2prob map
+    for (int32 iter = 0; iter < prob_size; iter++) {
+      // Read history size
+      ExpectToken(is, binary, "<HistorySize>");
+      int32 hist_size;
+      ReadBasicType(is, binary, &hist_size);
+      // Read history
+      ExpectToken(is, binary, "<History>");
+      HistType hist;
+      ReadIntegerPairVector(is, binary, &hist);
+      // Read graphone2prob map size
+      ExpectToken(is, binary, "<Graphone2ProbMapSize>");
+      int32 graphone_size;
+      ReadBasicType(is, binary, &graphone_size);
+      // Read graphone2prob map
+      ExpectToken(is, binary, "<Graphone2ProbMap>");
+      Graphone2ProbType graphone_map;
+      for (int32 iter2 = 0; iter2 < graphone_size; iter2++) {
+        // Read graphone
+        std::vector<std::pair<int32, int32> > graphone;
+        ReadIntegerPairVector(is, binary, &graphone);
+        // Read probability of a graphone given a certain history
+        float prob;
+        ReadBasicType(is, binary, &prob);
+        graphone_map[graphone[0]] = prob;
       }
-      is >> ch;
-      assert(ch == '}');
-      // std::cout << "order " << order << " is finished. current symbol is '}'" << ch<< std::endl;
+      (*prob)[o][hist] = graphone_map;
     }
-  } // end of text mode
+  }
 }
 
-// Test Read and Write functions. 
-void G2PModel::TestWriteRead(char* file, bool binary) {
-  Write(file, binary);
-  std::cout << "print out the original probs: ";
-  PrintWrite();
-
-  std::vector<CountType> prob;
-  std::ifstream f1;
-  f1.open(file);
-  ReadProb(f1, binary, &prob);
-  PrintRead(&prob);
-  f1.close();
-}
-
+// This function writes model parameters into binary/text file. 
 void G2PModel::Write(char* file, bool binary) const {
-  std::ofstream f(file);
-  WriteProb(f, binary);
-  std::cout << "print out the original probs: ";
-  f.close();
+  std::ofstream os(file);
+  WriteToken(os, binary, "<NgramParameters>");
+  // Write ngram-order
+  WriteToken(os, binary, "<NgramOrders>");
+  WriteBasicType(os, binary, ngram_order_);
+  // Write bos_
+  WriteToken(os, binary, "<BOS>");
+  WriteBasicType(os, binary, bos_);
+  // Write eos_
+  WriteToken(os, binary, "<EOS>");
+  WriteBasicType(os, binary, eos_);
+  // Write number of graphemes
+  WriteToken(os, binary, "<NumGraphemes>");
+  WriteBasicType(os, binary, num_graphemes_);
+  // Write number of phonemes
+  WriteToken(os, binary, "<NumPhonemes>");
+  WriteBasicType(os, binary, num_phonemes_);
+  // Write probabilities of each graphone give a certain history
+  WriteToken(os, binary, "<Probs>");
+  WriteProb(os, binary);
+  WriteToken(os, binary, "</NgramParameters>");
+  os.close();
 }
 
+// This function reads model parameters from binary/text file. 
 void G2PModel::Read(char* file, bool binary) {
-  std::ifstream f;
-  f.open(file);
-  ReadProb(f, binary, &prob_);
-  f.close();
+  std::ifstream is;
+  is.open(file);
+  ExpectToken(is, binary, "<NgramParameters>");
+  // Read ngram-order
+  ExpectToken(is, binary, "<NgramOrders>");
+  ReadBasicType(is, binary, &ngram_order_);
+  std::cout << "Ngram order is: " << ngram_order_ << std::endl;
+  // Read bos_
+  ExpectToken(is, binary, "<BOS>");
+  ReadBasicType(is, binary, &bos_);
+  // Read eos_
+  ExpectToken(is, binary, "<EOS>");
+  ReadBasicType(is, binary, &eos_);
+  // Read number of grahememes
+  ExpectToken(is, binary, "<NumGraphemes>");
+  ReadBasicType(is, binary, &num_graphemes_);
+  // Read number of phonemes
+  ExpectToken(is, binary, "<NumPhonemes>");
+  ReadBasicType(is, binary, &num_phonemes_);
+  // Read probabilities of each graphone give a certain history
+  ExpectToken(is, binary, "<Probs>");
+  // Clear prob_ before reading from file
+  prob_.clear();
+  // Read probabilities from model file
+  ReadProb(is, binary, &prob_);
+  ExpectToken(is, binary, "</NgramParameters>");
+  is.close();
   std::cout << "finished reading model." << std::endl;
 }
 
+// This function prints prob_ (for testing). 
 void G2PModel::PrintWrite() {
   for (int32 o = 0; o < ngram_order_; o++) {
-    // iterate the hashmap of vector of int pairs (history) and dict of graphone vs. prob
-    std::cout << "order is " << o + 1 << std::endl;
+    std::cout << "order is " << o << std::endl;
     CountType::const_iterator it = prob_[o].begin();
     for (; it != prob_[o].end(); it++) {
       // write history
-      std::cout << "Write: history is " << std::endl;
+      std::cout << "Write: history is: " << std::endl;
       HistType::const_iterator it_v = (it->first).begin();
       for (; it_v != (it->first).end(); it_v++) {
         std::cout << "( " << it_v->first << " " << it_v->second << " )" << std::endl;
@@ -819,30 +885,30 @@ void G2PModel::PrintWrite() {
       Graphone2ProbType::const_iterator it_gp = (it->second).begin();
       for (; it_gp != (it->second).end(); it_gp++) {
         // write graphone
-        std::cout  << "Write: graphone is " << (it_gp->first).first << " " << (it_gp->first).second << std::endl;
+        std::cout  << "Write: graphone is: " << (it_gp->first).first << " " << (it_gp->first).second << std::endl;
         // write prob
-        std::cout << "Write: float is " << it_gp->second << std::endl;
+        std::cout << "Write: float is: " << it_gp->second << std::endl;
       }
     }
   }
 }
 
+// This function prints prob_ which is read from model file (for testing).
 void G2PModel::PrintRead(std::vector<CountType>* prob) {
   for (int32 o = 0; o < ngram_order_; o++) {
-    std::cout << "order is " << o + 1 << std::endl;
+    std::cout << "order is: " << o << std::endl;
     CountType::const_iterator it = (*prob)[o].begin();
     for (; it != (*prob)[o].end(); ++it) {
-      std::cout << "Read: history is " << std::endl;
+      std::cout << "Read: history is: " << std::endl;
       HistType::const_iterator it_v = (it->first).begin();
       for (; it_v != (it->first).end(); ++it_v) {
         std::cout << "( " << it_v->first << " " << it_v->second << " )" << std::endl;
       }
       Graphone2ProbType::const_iterator it_gp = (it->second).begin();
       for (; it_gp != (it->second).end(); ++it_gp) {
-        std::cout  << "Read: graphone is " << (it_gp->first).first << " " << (it_gp->first).second << std::endl;
-        std::cout << "Read: float is " << it_gp->second << std::endl;
+        std::cout  << "Read: graphone is: " << (it_gp->first).first << " " << (it_gp->first).second << std::endl;
+        std::cout << "Read: float is: " << it_gp->second << std::endl;
       }
     }
   }
 }
-
