@@ -237,8 +237,9 @@ struct SourceInfo {
             node_id(node_id), graphone(graphone), arc_cost(arc_cost) {}
 };
 
-/// A mapping from the current State to the best cost we encountered so far
-/// from the start to here, and the last source Node in the best path.
+/// A mapping from the current State to the Node storing the best cost we've
+/// encountered so far from the start to here, and information of the last
+/// source Node along the best path.
 typedef unordered_map<State, std::pair<Node*, SourceInfo>, State::Hasher> BestCostType;
 
 /// The graph we use to back-trace the decoding graph in the second pass A-star search,

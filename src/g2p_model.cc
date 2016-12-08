@@ -50,11 +50,11 @@ G2PModel::G2PModel(int32 ngram_order, int32 num_graphemes, int32 num_phonemes) {
 // Constructor for training.
 G2PModel::G2PModel(int32 ngram_order, float discounting_constant_min, 
                    float discounting_constant_max, int32 num_graphemes, int32 num_phonemes,
-                   char* words_file, char* prons_file) {
+                   char* train_words_file, char* train_prons_file, char* valid_words_file, char* valid_prons_file) {
   discounting_constants_.resize(ngram_order);
   for (int32 i = 0; i < ngram_order; i++) {
     discounting_constants_[i] = discounting_constant_min + (discounting_constant_max
-      - discounting_constant_min) / static_cast<float>(ngram_order-1) * i;
+     - discounting_constant_min) / static_cast<float>(ngram_order-1) * i;
     std::cout << "discounting_constant for order " << i << " is " << discounting_constants_[i] << std::endl;
   }
   ngram_order_ = ngram_order;
@@ -64,11 +64,15 @@ G2PModel::G2PModel(int32 ngram_order, float discounting_constant_min,
   eps_ = 0; // following the OpenFst convention.
   num_graphemes_ = num_graphemes;
   num_phonemes_ = num_phonemes;
-  ReadSequences(num_graphemes_, words_file, &words_);
-  ReadSequences(num_phonemes_, prons_file, &prons_);
+  ReadSequences(num_graphemes_, train_words_file, &train_words_);
+  ReadSequences(num_phonemes_, train_prons_file, &train_prons_);
+  ReadSequences(num_graphemes_, valid_words_file, &valid_words_);
+  ReadSequences(num_phonemes_, valid_prons_file, &valid_prons_);
 
-  assert(words_.size() == prons_.size());
-  std::cout << "Read " << words_.size() << " word-pronunciation pairs."<< std::endl;
+  assert(train_words_.size() == train_prons_.size());
+  assert(valid_words_.size() == valid_prons_.size());
+  std::cout << "Read " << train_words_.size() << " training word-pronunciation pairs."<< std::endl;
+  std::cout << "Read " << valid_words_.size() << " valid word-pronunciation pairs."<< std::endl;
   for (int32 i = 1; i <= num_graphemes_; i++) {
     for (int32 j = 1; j <= num_phonemes_; j++) {
       graphones_.push_back(std::pair<int32, int32>(i, j));
@@ -90,19 +94,19 @@ G2PModel::G2PModel(int32 ngram_order, float discounting_constant_min,
 }
 
 /// Train the G2P model, assuming we already read in training data into
-/// words_ and prons_ in the constructor.
+/// train_words_ and train_prons_ in the constructor.
 void G2PModel::Train(int32 num_threads) {
   std::vector<std::vector<std::vector<int32> > > word_subsets(num_threads);
   std::vector<std::vector<std::vector<int32> > > pron_subsets(num_threads);
-  int32 block_size = words_.size() / num_threads;
-  if (block_size * num_threads < words_.size()) block_size += 1;
+  int32 block_size = train_words_.size() / num_threads;
+  if (block_size * num_threads < train_words_.size()) block_size += 1;
   std::cout << "running with " << num_threads << 
     " threads , # training examples for each thread is " << block_size << std::endl; 
   for(int32 i = 0; i < num_threads; i++) {
     for(int32 j = i*block_size; j < (i+1)*block_size; j++) {
-      if (j >= words_.size()) break;
-      word_subsets[i].push_back(words_[j]);
-      pron_subsets[i].push_back(prons_[j]);
+      if (j >= train_words_.size()) break;
+      word_subsets[i].push_back(train_words_[j]);
+      pron_subsets[i].push_back(train_prons_[j]);
     }
   }
   for (int32 i = 0; i < graphones_.size(); i++) {
@@ -110,10 +114,12 @@ void G2PModel::Train(int32 num_threads) {
     HistType h0;
     prob_[0][h0][g] = 1.0f / static_cast<float>(graphones_.size());
   }
+  float log_like_valid = 0.0;
+  float log_like_train = 0.0;
   for (int32 o = 0; o < ngram_order_; o++) {
     float log_like_last = -1.0;
     while (true) {
-      float log_like_tot = 0.0;
+      log_like_train = 0.0;
       std::vector<std::thread> threads(num_threads);
       std::vector<float> log_like(num_threads);
       std::vector<CountType> counts(num_threads);
@@ -125,17 +131,26 @@ void G2PModel::Train(int32 num_threads) {
       }
       for (int32 i = 0; i < num_threads; i++) {
         threads[i].join();
-        log_like_tot += log_like[i];
+        log_like_train += log_like[i];
         MergeCount(counts[i], o);
       }
-      log_like_tot /= static_cast<float>(words_.size());
-      std::cout << "order " << o << " log likelihood on training data is " << log_like_tot << std::endl;
+      log_like_train /= static_cast<float>(train_words_.size());
+      
+      log_like_valid = 0.0;
+      for(int32 i = 0; i < valid_words_.size(); i++) {
+        float log_like = ForwardBackward(valid_words_[i], valid_prons_[i], o, true);
+        log_like_valid += log_like;
+      }
+      log_like_valid /= static_cast<float>(valid_words_.size());
+
+      std::cout << "order " << o << " log likelihood on training data is " << log_like_train << "; on valid data is " << log_like_valid << std::endl;
       // The stopping condition relies on the change in log-likelihood.
-      if (fabs(log_like_tot - log_like_last) < 0.1) break;
-      log_like_last = log_like_tot;
+      if (fabs(log_like_valid - log_like_last) < 0.001) break;
+      log_like_last = log_like_valid;
       UpdateProb(o);
     }
   }
+  std::cout << "Final log likelihood on valid data is " << log_like_valid << " on training data is " << log_like_train << std::endl;
 }
 
 /// Test the G2P model, given a list of test words, and we output the
@@ -679,6 +694,20 @@ void G2PModel::Enqueue(const Node& node, const std::pair<int32, int32>& g,
   // with the same word-position is smaller than max_num_active_nodes.
   State s(pos_new, phone_hist_new);
   SourceInfo source_info(nodes_visited_.size()-1, g, logp); // backpointer to the source state.
+
+  float cost_new = fcost_new + bcost_new;
+  if ((*num_active)[pos_new] < max_num_active_nodes_) {
+     // std::cout << (*num_active)[node_new.pos] << " " <<  max_num_active_nodes_ << std::endl;
+    (*num_active)[pos_new] += 1;
+    if (cost_new > (*beam_width)[pos_new])
+       (*beam_width)[pos_new] = cost_new;
+  } else if (cost_new < (*beam_width)[pos_new]) {
+    // std::cout << " the current node's cost " << cost_new << "is worse than the beam width. " << (*beam_width)[pos_new] << std::endl;
+    return;
+  } else {
+    std::cout << " the current node's cost " << cost_new << "is better than the beam width. " << (*beam_width)[pos_new] << std::endl;
+  }
+
   auto it = best_cost_.find(s);
   if (it == best_cost_.end()) {
     Node *node_new = new Node(s, fcost_new, bcost_new);
@@ -701,17 +730,9 @@ void G2PModel::Enqueue(const Node& node, const std::pair<int32, int32>& g,
     graph_[s].push_back(source_info); 
   }
 
-  //  if ((*num_active)[node_new.pos] < max_num_active_nodes_) {
-      
-      // std::cout << (*num_active)[node_new.pos] << " " <<  max_num_active_nodes_ << std::endl;
-    //  (*num_active)[node_new->state.pos] += 1;
-    //  if (cost_new > (*beam_width)[node_new->state.pos])
-    //    (*beam_width)[node_new->state.pos] = cost_new;
- //   } else if (cost_new > (*beam_width)[node_new.pos]) {
-      // std::cout << " the current node's cost " << cost_new << "is better than the beam width. " << (*beam_width)[node_new.pos] << std::endl;
+   
       // q->push(node_new);
  //   } else {
-     // std::cout << " the current node's cost " << cost_new << "is worse than the beam width. " << (*beam_width)[node_new.pos] << std::endl;
  //   }
  // }
 }

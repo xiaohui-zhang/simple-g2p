@@ -9,7 +9,7 @@ set -x
 rootdir=$(dirname "$0")/..
 PATH=$PATH:$rootdir/scripts:$rootdir/src
 
-num_threads=3
+num_threads=5
 
 # parse options.
 for iter in 1; do
@@ -37,15 +37,15 @@ phones=$2
 ngram_order=$3
 dir=$4
 
-num_total=1300
-num_train=1000
-discounting_constant_min=0.1
-discounting_constant_max=0.5
+num_total=180000
+num_train=170000
+discounting_constant_min=0.3
+discounting_constant_max=0.8
 
 # For convenience of testing.
 if [ -z $lexicon ]; then lexicon="/export/a11/xzhang/tedlium/s5_r2/data/local/dict/lexicon.txt"; fi
 if [ -z $phones ]; then phones="/export/a11/xzhang/tedlium/s5_r2/data/local/dict/nonsilence_phones.txt"; fi
-if [ -z $ngram_order ]; then ngram_order=3; fi
+if [ -z $ngram_order ]; then ngram_order=4; fi
 if [ -z $dir ]; then dir=exp; fi
 
 mkdir -p $dir

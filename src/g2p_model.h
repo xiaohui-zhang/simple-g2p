@@ -58,7 +58,7 @@ class G2PModel {
   G2PModel(int32 ngram_order, int32 num_graphemes, int32 num_phonemes);
   
   G2PModel(int32 ngram_order, float discounting_constant_min, float discounting_constant_max,
-           int32 num_graphemes, int32 num_phonemes, char* words_file, char* prons_file);
+           int32 num_graphemes, int32 num_phonemes, char* train_words_file, char* train_prons_file, char* valid_words_file, char* valid_prons_file);
   
   /// Train the G2P model, assuming we already read in training data into
   /// words_ and prons_ in the constructor.
@@ -171,9 +171,14 @@ class G2PModel {
   /// N-gram probabilities.
   std::vector<CountType> prob_;
   /// Training words.
-  std::vector<std::vector<int32> > words_;
+  std::vector<std::vector<int32> > train_words_;
   /// Training pronunciations.
-  std::vector<std::vector<int32> > prons_;
+  std::vector<std::vector<int32> > train_prons_;
+  /// Valid words.
+  std::vector<std::vector<int32> > valid_words_;
+  /// Valid pronunciations.
+  std::vector<std::vector<int32> > valid_prons_;
+  
   /// All valid graphones (a vector of pairs of integers).
   HistType graphones_;
   /// The look-up table which stores, for each letter l2 given another letter l1 as

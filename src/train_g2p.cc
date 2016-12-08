@@ -20,9 +20,12 @@
 #include "g2p_model.h"
 
 int main(int argc, char **argv) {
-  // arguments: ngram_order, discouting_constant_min, discounting_constant_max, num_graphemes, num_phonemes, training words, training prons, num_threads, output_model
-  G2PModel mdl(atoi(argv[1]), atof(argv[2]), atof(argv[3]), atoi(argv[4]), atoi(argv[5]), argv[6], argv[7]); 
-  mdl.Train(atoi(argv[8]));
-  mdl.Write(argv[9], true);
+  // arguments: 
+  // 1:ngram_order, 2:discouting_constant_min, 3:discounting_constant_max, 4:num_graphemes, 
+  // 5:num_phonemes, 6:training words, 7:training prons, 8:valid words, 
+  // 9:valid prons, 10:num_threads, 11:output_model
+  G2PModel mdl(atoi(argv[1]), atof(argv[2]), atof(argv[3]), atoi(argv[4]), atoi(argv[5]), argv[6], argv[7], argv[8], argv[9]); 
+  mdl.Train(atoi(argv[10]));
+  mdl.Write(argv[11], true);
   return 0;
 }
